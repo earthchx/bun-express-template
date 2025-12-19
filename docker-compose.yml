@@ -1,0 +1,52 @@
+name: my-express-stack
+
+services:
+  # 1. Database Service (PostgreSQL)
+  db:
+    image: postgres:16-alpine
+    restart: always
+    container_name: my-postgres-db
+    networks:
+      - default # ใช้ network ภายในของ stack นี้
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: mydb
+    ports:
+      - '5432:5432' # เปิด port ออกมาเผื่อใช้ Database Client (DBeaver/TablePlus) เชื่อมต่อ
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      # ตรวจสอบว่า DB พร้อมรับ connection หรือยัง (สำคัญมาก!)
+      test: ['CMD-SHELL', 'pg_isready -U myuser -d mydb']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Application Service (Bun + Express)
+  api:
+    image: ghcr.io/YOUR_USER/YOUR_REPO:latest # ใช้ Image จาก Registry
+    container_name: my-express-app # 🔥 ชื่อนี้สำคัญ! ต้องตรงกับใน Caddyfile
+    restart: always
+    # ports:           <-- ❌ ลบส่วนนี้ทิ้ง หรือ comment ไว้
+    #   - "3000:3000"  <-- เราจะไม่ให้ใครเข้าผ่าน :3000 โดยตรงแล้ว
+    expose:
+      - '3000' # บอกเฉยๆ ว่าเปิด 3000 (optional ใน docker compose แต่ใส่ไว้กันลืม)
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://myuser:mypassword@db:5432/mydb
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default # เพื่อคุยกับ DB
+      - web_proxy # 🔥 เพื่อคุยกับ Caddy
+
+volumes:
+  pg_data: # พื้นที่เก็บข้อมูลถาวร (ลบ container ข้อมูลไม่หาย)
+
+networks:
+  default: # network ภายใน stack
+  web_proxy: # network ภายนอกที่จะเชื่อมไปหา Caddy
+    external: true

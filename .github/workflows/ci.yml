@@ -1,0 +1,168 @@
+# =============================================================================
+# CI/CD Pipeline for MVC Pattern Express API
+# =============================================================================
+# This workflow runs on every push/PR to main branch:
+# 1. Quality Check: Lint, Type Check, and Tests with PostgreSQL
+# 2. Build & Push: Docker image to GitHub Container Registry (GHCR)
+# =============================================================================
+
+name: CI/CD Pipeline
+
+# Trigger: push หรือ PR เข้า main branch
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    branches: ['main']
+
+# Global Environment Variables
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }} # ghcr.io/username/repo-name
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Quality Check (Lint, Type Check, Test)
+  # ===========================================================================
+  # - Uses PostgreSQL service container for integration tests
+  # - Runs ESLint, TypeScript type checking, and Bun tests
+  # ===========================================================================
+  quality-check:
+    runs-on: ubuntu-latest
+
+    # ---------------------------------------------------------------------------
+    # Service Containers: PostgreSQL for integration tests
+    # ---------------------------------------------------------------------------
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        # Health check: รอให้ DB พร้อมก่อนรัน tests
+        options: >-
+          --health-cmd="pg_isready -U testuser -d testdb"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    # Job-level environment variables
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Checkout source code
+      # -------------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # -------------------------------------------------------------------------
+      # Step 2: Setup Bun runtime
+      # -------------------------------------------------------------------------
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # -------------------------------------------------------------------------
+      # Step 3: Install dependencies (frozen lockfile for reproducibility)
+      # -------------------------------------------------------------------------
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      # -------------------------------------------------------------------------
+      # Step 4: ESLint - Check code quality
+      # -------------------------------------------------------------------------
+      - name: Lint Check
+        run: bun run lint
+
+      # -------------------------------------------------------------------------
+      # Step 5: TypeScript - Type checking without emit
+      # -------------------------------------------------------------------------
+      - name: Type Check
+        run: bun x tsc --noEmit
+
+      # -------------------------------------------------------------------------
+      # Step 6: Push Drizzle schema to test database
+      # -------------------------------------------------------------------------
+      - name: Push Test Schema to DB
+        run: bun run db:test:push
+
+      # -------------------------------------------------------------------------
+      # Step 7: Run all tests (unit + integration)
+      # -------------------------------------------------------------------------
+      - name: Run Tests
+        run: bun test
+
+  # ===========================================================================
+  # JOB 2: Build & Push Docker Image (CD)
+  # ===========================================================================
+  # - Only runs after quality-check passes
+  # - Only runs on push to main (not on PRs)
+  # - Builds multi-platform Docker image and pushes to GHCR
+  # ===========================================================================
+  build-and-push:
+    needs: quality-check
+    # Only run on push to main (skip for PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    # Permissions required for GHCR
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Checkout source code
+      # -------------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # -------------------------------------------------------------------------
+      # Step 2: Login to GitHub Container Registry
+      # -------------------------------------------------------------------------
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------------------------------------------------------
+      # Step 3: Extract Docker metadata (tags, labels)
+      # Tags: latest + commit SHA for versioning
+      # -------------------------------------------------------------------------
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # -------------------------------------------------------------------------
+      # Step 4: Setup Docker Buildx for advanced build features
+      # -------------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -------------------------------------------------------------------------
+      # Step 5: Build and push Docker image with GitHub Actions cache
+      # -------------------------------------------------------------------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions cache for faster builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
